@@ -3,7 +3,6 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import pandas as pd
@@ -70,6 +69,7 @@ def get_driver():
     }
     chrome_options.add_experimental_option("prefs", prefs)
 
+    # Adjust path if needed for your specific environment
     service = Service(executable_path="/usr/bin/chromedriver")
     driver = webdriver.Chrome(service=service, options=chrome_options)
     
@@ -103,9 +103,7 @@ def run_scrape(username, password):
             pass_field.send_keys(password)
             time.sleep(0.5)
             
-            # 2. CLICK BUTTON (Updated for Vuetify)
-            # We look for a button containing "Log In" (case insensitive/trimmed)
-            # The span inside has the text, so we search for that.
+            # 2. CLICK BUTTON 
             submit_btn = wait.until(EC.element_to_be_clickable((
                 By.XPATH, "//button[contains(., 'Log In')]"
             )))
@@ -117,36 +115,55 @@ def run_scrape(username, password):
             raise Exception("Could not interact with login form. See screenshot.")
 
         # Wait for redirect
-        time.sleep(8)
+        time.sleep(5)
         
         # Verify Login Success
         if "wp-login" in driver.current_url:
             driver.save_screenshot("login_failed.png")
             st.image("login_failed.png", caption="Login Page (Failed to Redirect)")
-            raise Exception("Login failed. Check credentials or CAPTCHA.")
+            raise Exception("Login failed. Check credentials.")
 
         # B. NAVIGATE TO SESSIONS
-        status_text.info("Login Successful! Going to Sessions...")
+        status_text.info("Login Successful! going to Sessions...")
         driver.get("https://myflightscope.com/sessions/#APP=FS_GOLF")
         
-        # C. SELECT SESSION
+        # C. SELECT SESSION (UPDATED LOGIC)
         status_text.info("Opening most recent session...")
         try:
-            view_link = wait.until(EC.element_to_be_clickable(
-                (By.XPATH, "//a[contains(@href, '/fs-golf/') and contains(text(), 'View')]")
-            ))
-            driver.execute_script("arguments[0].scrollIntoView();", view_link)
-            time.sleep(1)
-            view_link.click()
-        except:
+            # 1. Wait for the TABLE CONTAINER (The Main Wrapper)
+            # This ensures we don't try to read before the list loads
+            wrapper = wait.until(EC.presence_of_element_located((
+                By.ID, "sessions-datatable"
+            )))
+
+            # 2. Find the rows inside the table body
+            # We ignore the misleading 'No data found' attribute and just look for tr tags
+            rows = wrapper.find_elements(By.CSS_SELECTOR, "table tbody tr")
+            
+            if not rows:
+                raise Exception("Table container found, but 0 rows detected.")
+
+            # 3. Get the first row (Most Recent)
+            latest_row = rows[0]
+            
+            # 4. Find the 'View' link inside that row
+            # It's usually in the last column, inside an <a> tag
+            view_link = latest_row.find_element(By.TAG_NAME, "a")
+            
+            # 5. Click or Navigate
+            # Using get_attribute('href') is often safer than .click() if elements overlap
+            session_url = view_link.get_attribute("href")
+            driver.get(session_url)
+            
+        except Exception as e:
             driver.save_screenshot("session_error.png")
-            st.image("session_error.png")
-            raise Exception("Could not find the session list.")
+            st.image("session_error.png", caption="Failed to find/click session list")
+            raise Exception(f"Could not find the session list: {e}")
         
         # D. CLICK EXPORT
         status_text.info("Locating Export button...")
         try:
-            # Updated to match your exact Vuetify span text
+            # Wait specifically for the Export text span
             export_span = wait.until(EC.element_to_be_clickable((
                 By.XPATH, "//span[contains(text(), 'Export Table to CSV')]"
             )))
