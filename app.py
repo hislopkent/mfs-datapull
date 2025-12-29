@@ -18,136 +18,168 @@ if not os.path.exists(DOWNLOAD_DIR):
 
 # --- 1. DATA CLEANING UTILITY ---
 def clean_flightscope_data(df):
-    """
-    Cleans the raw FlightScope CSV:
-    1. Removes 'Avg' and 'Dev' rows.
-    2. Converts '5.2 L' -> -5.2 and '5.2 R' -> 5.2 for key columns.
-    3. Converts numeric columns to proper float types.
-    """
-    # 1. Remove Summary Rows (Avg/Dev in the 'Shot' column)
+    """Cleans FlightScope data for analysis."""
     if 'Shot' in df.columns:
         df = df[~df['Shot'].isin(['Avg', 'Dev', 'Average', 'Deviation'])]
 
-    # 2. Helper to convert "10.5 L" to -10.5
     def parse_directional(val):
-        if not isinstance(val, str):
-            return val
+        if not isinstance(val, str): return val
         val = val.strip()
-        # Check for L/R suffix
         if val.endswith('L'):
-            try:
-                return -float(re.sub(r'[^\d\.]', '', val))
-            except:
-                return 0.0
+            try: return -float(re.sub(r'[^\d\.]', '', val))
+            except: return 0.0
         elif val.endswith('R'):
-            try:
-                return float(re.sub(r'[^\d\.]', '', val))
-            except:
-                return 0.0
+            try: return float(re.sub(r'[^\d\.]', '', val))
+            except: return 0.0
         else:
-            # Just try to clean any non-numeric chars except . and -
             try:
                 clean_val = re.sub(r'[^\d\.-]', '', val)
                 return float(clean_val) if clean_val else 0.0
-            except:
-                return val
+            except: return val
 
-    # Columns that typically have L/R directions
     directional_cols = ['Swing H (°)', 'Lateral (yds)', 'Spin Axis (°)', 
                         'Club Path (°)', 'Launch H (°)', 'FTP (°)', 'FTT (°)']
     
     for col in directional_cols:
         if col in df.columns:
             df[col] = df[col].apply(parse_directional)
-
-    # 3. Convert other numeric columns (stripping ' yds', ' mph', etc if present)
-    for col in df.columns:
-        if col not in ['club', 'Shot', 'Shot Type', 'Mode', 'Location']:
-            # Force conversion to numeric, coercing errors
-            df[col] = pd.to_numeric(df[col], errors='ignore')
-
+            
     return df
 
-# --- 2. SETUP HEADLESS BROWSER ---
+# --- 2. SETUP STEALTH BROWSER ---
 def get_driver():
     chrome_options = Options()
+    
+    # --- STEALTH SETTINGS (CRITICAL FOR LOGGING IN) ---
     chrome_options.add_argument("--headless") 
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
+    
+    # 1. Spoof User Agent (Look like a real PC)
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    
+    # 2. Hide Automation Flags
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+    
     chrome_options.add_argument("--window-size=1920,1080")
     
     prefs = {
         "download.default_directory": DOWNLOAD_DIR,
         "download.prompt_for_download": False,
         "download.directory_upgrade": True,
-        "safebrowsing.enabled": True
+        "safebrowsing.enabled": True,
+        "credentials_enable_service": False,
+        "profile.password_manager_enabled": False
     }
     chrome_options.add_experimental_option("prefs", prefs)
 
     service = Service(executable_path="/usr/bin/chromedriver")
     driver = webdriver.Chrome(service=service, options=chrome_options)
+    
+    # 3. Execute script to further hide selenium
+    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+    
     return driver
 
 # --- 3. THE SCRAPING LOGIC ---
 def run_scrape(username, password):
     status_text = st.empty()
-    status_text.info("Initiating Browser...")
+    status_text.info("Initiating Stealth Browser...")
     
     driver = get_driver()
-    wait = WebDriverWait(driver, 25)
+    wait = WebDriverWait(driver, 20)
     
     try:
         # A. LOGIN
         status_text.info("Logging into FlightScope...")
         driver.get("https://myflightscope.com/wp-login.php")
         
-        user_field = wait.until(EC.presence_of_element_located((By.NAME, "log")))
-        pass_field = driver.find_element(By.NAME, "pwd")
-        
-        user_field.send_keys(username)
-        pass_field.send_keys(password)
-        pass_field.send_keys(Keys.RETURN)
-        
-        time.sleep(5)
+        # Wait for fields
+        try:
+            user_field = wait.until(EC.element_to_be_clickable((By.NAME, "log")))
+            pass_field = driver.find_element(By.NAME, "pwd")
+            
+            # Clear fields just in case
+            user_field.clear()
+            pass_field.clear()
+            
+            # Type slowly (mimic human)
+            user_field.send_keys(username)
+            time.sleep(0.5)
+            pass_field.send_keys(password)
+            time.sleep(0.5)
+            
+            # FIND AND CLICK THE SUBMIT BUTTON EXPLICITLY
+            # Standard WordPress ID for the submit button is "wp-submit"
+            submit_btn = driver.find_element(By.ID, "wp-submit")
+            submit_btn.click()
+            
+        except Exception as e:
+            driver.save_screenshot("login_field_error.png")
+            st.image("login_field_error.png", caption="Error finding login fields")
+            raise Exception("Could not find login box.")
 
-        # B. NAVIGATE
-        status_text.info("Navigating to Sessions...")
+        # Wait for redirect
+        time.sleep(5)
+        
+        # --- LOGIN DEBUG CHECK ---
+        # If we are still on the login page, it failed.
+        if "wp-login" in driver.current_url:
+            driver.save_screenshot("login_failed.png")
+            st.image("login_failed.png", caption="Login Failed: This is what the screen looks like.")
+            
+            # Check for common error messages in the page source
+            if "ERROR" in driver.page_source.upper():
+                st.error("The website reported an error (e.g. Invalid Password).")
+            elif "ROBOT" in driver.page_source.upper() or "CAPTCHA" in driver.page_source.upper():
+                st.error("The website flagged this as a Bot/Spam.")
+            
+            raise Exception("Login did not redirect. Credentials might be wrong or bot detected.")
+
+        # B. NAVIGATE TO SESSIONS
+        status_text.info("Login Successful! Going to Sessions...")
         driver.get("https://myflightscope.com/sessions/#APP=FS_GOLF")
         
         # C. SELECT SESSION
         status_text.info("Opening most recent session...")
         try:
+            # Wait for the specific FS Golf View button
             view_link = wait.until(EC.element_to_be_clickable(
                 (By.XPATH, "//a[contains(@href, '/fs-golf/') and contains(text(), 'View')]")
             ))
+            # Scroll to it
+            driver.execute_script("arguments[0].scrollIntoView();", view_link)
+            time.sleep(1)
             view_link.click()
         except:
-            driver.save_screenshot("error_view.png")
-            st.image("error_view.png")
-            raise Exception("Could not find 'View' button.")
+            driver.save_screenshot("session_error.png")
+            st.image("session_error.png", caption="I can't find the 'View' button.")
+            raise Exception("Could not find the session list.")
         
         # D. CLICK EXPORT (Vuetify Button)
         status_text.info("Locating Export button...")
         try:
+            # Look for the exact text you found in the inspection
             export_span = wait.until(EC.element_to_be_clickable((
                 By.XPATH, "//span[contains(text(), 'Export Table to CSV')]"
             )))
             driver.execute_script("arguments[0].scrollIntoView();", export_span)
-            time.sleep(1)
+            time.sleep(2) # Extra wait for animation
             export_span.click()
         except:
-            driver.save_screenshot("error_export.png")
-            st.image("error_export.png")
+            driver.save_screenshot("export_error.png")
+            st.image("export_error.png", caption="I can't find the Export button.")
             raise Exception("Could not find 'Export Table to CSV' button.")
 
         status_text.info("Downloading...")
-        time.sleep(8)
+        time.sleep(10) # Generous time for download
         
         # E. RETURN FILE
         files = os.listdir(DOWNLOAD_DIR)
         if not files:
-            raise Exception("No file downloaded.")
+            raise Exception("Button clicked, but no file appeared.")
         
         latest_file = max([os.path.join(DOWNLOAD_DIR, f) for f in files], key=os.path.getctime)
         return latest_file
@@ -171,51 +203,18 @@ if submitted and user and pw:
     
     if csv_path:
         st.success("Success! Session downloaded.")
-        
-        # Load Data
         try:
             df_raw = pd.read_csv(csv_path)
-            
-            # --- PREVIEW SECTION ---
             st.subheader("Session Summary")
-            
-            # Create a Cleaned Version
             df_clean = clean_flightscope_data(df_raw.copy())
-            
-            # Show Stats
-            shots_count = len(df_clean)
-            avg_carry = df_clean['Carry (yds)'].mean() if 'Carry (yds)' in df_clean else 0
-            avg_speed = df_clean['Ball (mph)'].mean() if 'Ball (mph)' in df_clean else 0
-            
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Total Shots", shots_count)
-            col2.metric("Avg Carry", f"{avg_carry:.1f} yds")
-            col3.metric("Avg Ball Speed", f"{avg_speed:.1f} mph")
-            
             st.dataframe(df_clean.head())
 
-            # --- DOWNLOAD OPTIONS ---
-            st.write("### Download Options")
-            
-            # Option 1: Cleaned Data (Best for analysis apps)
             csv_clean = df_clean.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Download Cleaned CSV (Ready for Analysis)",
-                data=csv_clean,
-                file_name="flightscope_clean.csv",
-                mime="text/csv"
-            )
+            st.download_button("📥 Download Cleaned CSV", csv_clean, "flightscope_clean.csv", "text/csv")
             
-            # Option 2: Raw Data (Original file)
             with open(csv_path, "rb") as f:
-                st.download_button(
-                    label="📄 Download Original Raw CSV",
-                    data=f,
-                    file_name="flightscope_raw.csv",
-                    mime="text/csv"
-                )
-                
+                st.download_button("📄 Download Original CSV", f, "flightscope_raw.csv", "text/csv")
         except Exception as e:
-            st.warning(f"Could not parse CSV for preview: {e}")
+            st.warning(f"Preview failed: {e}")
             with open(csv_path, "rb") as f:
                 st.download_button("Download Raw File", f, "data.raw")
