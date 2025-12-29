@@ -50,18 +50,13 @@ def clean_flightscope_data(df):
 def get_driver():
     chrome_options = Options()
     
-    # --- STEALTH SETTINGS (CRITICAL FOR LOGGING IN) ---
+    # --- STEALTH SETTINGS ---
     chrome_options.add_argument("--headless") 
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     
-    # 1. Spoof User Agent (Look like a real PC)
+    # Spoof User Agent
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-    
-    # 2. Hide Automation Flags
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option('useAutomationExtension', False)
     
     chrome_options.add_argument("--window-size=1920,1080")
     
@@ -78,7 +73,7 @@ def get_driver():
     service = Service(executable_path="/usr/bin/chromedriver")
     driver = webdriver.Chrome(service=service, options=chrome_options)
     
-    # 3. Execute script to further hide selenium
+    # Hide automation flag
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     
     return driver
@@ -96,47 +91,39 @@ def run_scrape(username, password):
         status_text.info("Logging into FlightScope...")
         driver.get("https://myflightscope.com/wp-login.php")
         
-        # Wait for fields
         try:
+            # 1. Fill Fields (Standard WP Names)
             user_field = wait.until(EC.element_to_be_clickable((By.NAME, "log")))
             pass_field = driver.find_element(By.NAME, "pwd")
             
-            # Clear fields just in case
             user_field.clear()
-            pass_field.clear()
-            
-            # Type slowly (mimic human)
             user_field.send_keys(username)
             time.sleep(0.5)
+            pass_field.clear()
             pass_field.send_keys(password)
             time.sleep(0.5)
             
-            # FIND AND CLICK THE SUBMIT BUTTON EXPLICITLY
-            # Standard WordPress ID for the submit button is "wp-submit"
-            submit_btn = driver.find_element(By.ID, "wp-submit")
+            # 2. CLICK BUTTON (Updated for Vuetify)
+            # We look for a button containing "Log In" (case insensitive/trimmed)
+            # The span inside has the text, so we search for that.
+            submit_btn = wait.until(EC.element_to_be_clickable((
+                By.XPATH, "//button[contains(., 'Log In')]"
+            )))
             submit_btn.click()
             
         except Exception as e:
-            driver.save_screenshot("login_field_error.png")
-            st.image("login_field_error.png", caption="Error finding login fields")
-            raise Exception("Could not find login box.")
+            driver.save_screenshot("login_error.png")
+            st.image("login_error.png", caption="Error during login interaction.")
+            raise Exception("Could not interact with login form. See screenshot.")
 
         # Wait for redirect
-        time.sleep(5)
+        time.sleep(8)
         
-        # --- LOGIN DEBUG CHECK ---
-        # If we are still on the login page, it failed.
+        # Verify Login Success
         if "wp-login" in driver.current_url:
             driver.save_screenshot("login_failed.png")
-            st.image("login_failed.png", caption="Login Failed: This is what the screen looks like.")
-            
-            # Check for common error messages in the page source
-            if "ERROR" in driver.page_source.upper():
-                st.error("The website reported an error (e.g. Invalid Password).")
-            elif "ROBOT" in driver.page_source.upper() or "CAPTCHA" in driver.page_source.upper():
-                st.error("The website flagged this as a Bot/Spam.")
-            
-            raise Exception("Login did not redirect. Credentials might be wrong or bot detected.")
+            st.image("login_failed.png", caption="Login Page (Failed to Redirect)")
+            raise Exception("Login failed. Check credentials or CAPTCHA.")
 
         # B. NAVIGATE TO SESSIONS
         status_text.info("Login Successful! Going to Sessions...")
@@ -145,36 +132,34 @@ def run_scrape(username, password):
         # C. SELECT SESSION
         status_text.info("Opening most recent session...")
         try:
-            # Wait for the specific FS Golf View button
             view_link = wait.until(EC.element_to_be_clickable(
                 (By.XPATH, "//a[contains(@href, '/fs-golf/') and contains(text(), 'View')]")
             ))
-            # Scroll to it
             driver.execute_script("arguments[0].scrollIntoView();", view_link)
             time.sleep(1)
             view_link.click()
         except:
             driver.save_screenshot("session_error.png")
-            st.image("session_error.png", caption="I can't find the 'View' button.")
+            st.image("session_error.png")
             raise Exception("Could not find the session list.")
         
-        # D. CLICK EXPORT (Vuetify Button)
+        # D. CLICK EXPORT
         status_text.info("Locating Export button...")
         try:
-            # Look for the exact text you found in the inspection
+            # Updated to match your exact Vuetify span text
             export_span = wait.until(EC.element_to_be_clickable((
                 By.XPATH, "//span[contains(text(), 'Export Table to CSV')]"
             )))
             driver.execute_script("arguments[0].scrollIntoView();", export_span)
-            time.sleep(2) # Extra wait for animation
+            time.sleep(2)
             export_span.click()
         except:
             driver.save_screenshot("export_error.png")
-            st.image("export_error.png", caption="I can't find the Export button.")
+            st.image("export_error.png")
             raise Exception("Could not find 'Export Table to CSV' button.")
 
         status_text.info("Downloading...")
-        time.sleep(10) # Generous time for download
+        time.sleep(10)
         
         # E. RETURN FILE
         files = os.listdir(DOWNLOAD_DIR)
@@ -206,9 +191,20 @@ if submitted and user and pw:
         try:
             df_raw = pd.read_csv(csv_path)
             st.subheader("Session Summary")
+            
+            # Clean and Show Stats
             df_clean = clean_flightscope_data(df_raw.copy())
+            if not df_clean.empty:
+                cols = st.columns(3)
+                cols[0].metric("Shots", len(df_clean))
+                if 'Carry (yds)' in df_clean.columns:
+                    cols[1].metric("Avg Carry", f"{df_clean['Carry (yds)'].mean():.1f} yds")
+                if 'Ball (mph)' in df_clean.columns:
+                    cols[2].metric("Avg Ball Speed", f"{df_clean['Ball (mph)'].mean():.1f} mph")
+            
             st.dataframe(df_clean.head())
 
+            # Downloads
             csv_clean = df_clean.to_csv(index=False).encode('utf-8')
             st.download_button("📥 Download Cleaned CSV", csv_clean, "flightscope_clean.csv", "text/csv")
             
