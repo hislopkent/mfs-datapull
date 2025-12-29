@@ -5,6 +5,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
 import pandas as pd
 import time
 import os
@@ -18,6 +19,7 @@ if not os.path.exists(DOWNLOAD_DIR):
 # --- 1. DATA CLEANING UTILITY ---
 def clean_flightscope_data(df):
     """Cleans FlightScope data for analysis."""
+    # Filter out average/deviation rows if they exist
     if 'Shot' in df.columns:
         df = df[~df['Shot'].isin(['Avg', 'Dev', 'Average', 'Deviation'])]
 
@@ -53,10 +55,7 @@ def get_driver():
     chrome_options.add_argument("--headless") 
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    
-    # Spoof User Agent
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-    
     chrome_options.add_argument("--window-size=1920,1080")
     
     prefs = {
@@ -71,19 +70,17 @@ def get_driver():
 
     service = Service(executable_path="/usr/bin/chromedriver")
     driver = webdriver.Chrome(service=service, options=chrome_options)
-    
-    # Hide automation flag
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     
     return driver
 
 # --- 3. THE SCRAPING LOGIC ---
-def run_scrape(username, password):
+def run_scrape(username, password, session_index=0):
     status_text = st.empty()
     status_text.info("Initiating Stealth Browser...")
     
     driver = get_driver()
-    wait = WebDriverWait(driver, 30) # Increased timeout to 30s
+    wait = WebDriverWait(driver, 30)
     
     try:
         # A. LOGIN
@@ -108,46 +105,70 @@ def run_scrape(username, password):
             
         except Exception as e:
             driver.save_screenshot("login_error.png")
-            st.image("login_error.png", caption="Error during login interaction.")
+            st.image("login_error.png", caption="Login Error")
             raise Exception("Could not interact with login form.")
 
-        # Wait for redirect
         time.sleep(5)
-        
         if "wp-login" in driver.current_url:
-            driver.save_screenshot("login_failed.png")
-            st.image("login_failed.png", caption="Login Page (Failed to Redirect)")
             raise Exception("Login failed. Check credentials.")
 
         # B. NAVIGATE TO SESSIONS
-        status_text.info("Login Successful! Going to Sessions...")
+        status_text.info("Going to Sessions List...")
         driver.get("https://myflightscope.com/sessions/#APP=FS_GOLF")
         
-        # C. SELECT SESSION (FIXED)
-        status_text.info("Waiting for session list to populate...")
+        # C. SELECT SESSION
+        status_text.info(f"Looking for session #{session_index + 1}...")
         try:
-            # FIX: Wait specifically for TR elements inside the table
+            # Wait for rows to populate
             rows = wait.until(EC.presence_of_all_elements_located((
                 By.CSS_SELECTOR, "#sessions-datatable table tbody tr"
             )))
 
-            if not rows:
-                raise Exception("Table loaded but returned empty list.")
+            if len(rows) <= session_index:
+                raise Exception(f"You asked for session #{session_index+1}, but only found {len(rows)} sessions.")
 
-            latest_row = rows[0]
-            view_link = latest_row.find_element(By.TAG_NAME, "a")
+            # Grab the specific row user requested
+            target_row = rows[session_index]
+            
+            # Extract info for the user to verify
+            cols = target_row.find_elements(By.TAG_NAME, "td")
+            if len(cols) > 2:
+                session_date = cols[1].text.replace("\n", " ")
+                session_name = cols[2].text
+                st.info(f"**Target Session:** {session_date} | {session_name}")
+            
+            view_link = target_row.find_element(By.TAG_NAME, "a")
             session_url = view_link.get_attribute("href")
             
-            status_text.info("Session found! Opening...")
+            status_text.info("Opening session details...")
             driver.get(session_url)
             
         except Exception as e:
             driver.save_screenshot("session_error.png")
-            st.image("session_error.png", caption="Session List Error")
-            raise Exception(f"Could not find session rows: {e}")
+            st.image("session_error.png", caption="Session Selection Error")
+            raise Exception(f"Could not select session: {e}")
         
-        # D. CLICK EXPORT
-        status_text.info("Locating Export button...")
+        # D. HANDLE PAGINATION & EXPORT
+        status_text.info("Checking for pagination...")
+        time.sleep(5) # Let the session detail table load
+        
+        # Optional: Try to expand rows to "All" if a dropdown exists
+        try:
+            # This is a generic attempt to find a "Rows per page" dropdown in Vuetify
+            # If it doesn't exist or fails, we just continue to export
+            pagination_select = driver.find_element(By.CSS_SELECTOR, ".v-data-footer__select .v-select")
+            pagination_select.click()
+            time.sleep(1)
+            all_option = driver.find_element(By.XPATH, "//div[contains(@class, 'v-list-item') and .//span[contains(text(), 'All')]]")
+            all_option.click()
+            time.sleep(3) # Wait for table to reload with all data
+            status_text.info("Expanded table to show all rows.")
+        except:
+            # It's okay if this fails, the export button usually handles it, 
+            # but sometimes "Export" only grabs visible rows.
+            pass
+
+        status_text.info("Clicking Export...")
         try:
             export_span = wait.until(EC.element_to_be_clickable((
                 By.XPATH, "//span[contains(text(), 'Export Table to CSV')]"
@@ -160,13 +181,13 @@ def run_scrape(username, password):
             st.image("export_error.png")
             raise Exception("Could not find 'Export Table to CSV' button.")
 
-        status_text.info("Downloading...")
+        status_text.info("Downloading file...")
         time.sleep(10)
         
         # E. RETURN FILE
         files = os.listdir(DOWNLOAD_DIR)
         if not files:
-            raise Exception("Button clicked, but no file appeared.")
+            raise Exception("Download initiated but no file found.")
         
         latest_file = max([os.path.join(DOWNLOAD_DIR, f) for f in files], key=os.path.getctime)
         return latest_file
@@ -181,36 +202,57 @@ def run_scrape(username, password):
 st.title("⛳ FlightScope Data Downloader")
 
 with st.form("login_form"):
-    user = st.text_input("FlightScope Email")
-    pw = st.text_input("Password", type="password")
-    submitted = st.form_submit_button("Fetch Latest Data")
+    c1, c2 = st.columns(2)
+    with c1:
+        user = st.text_input("FlightScope Email")
+    with c2:
+        pw = st.text_input("Password", type="password")
+    
+    # NEW: Dropdown to pick which session
+    session_option = st.selectbox(
+        "Which session to download?",
+        options=[0, 1, 2, 3, 4],
+        format_func=lambda x: "Latest Session" if x == 0 else f"{x+1}th Most Recent"
+    )
+    
+    submitted = st.form_submit_button("Fetch Data")
 
 if submitted and user and pw:
-    csv_path = run_scrape(user, pw)
+    # Clear old downloads
+    for f in os.listdir(DOWNLOAD_DIR):
+        os.remove(os.path.join(DOWNLOAD_DIR, f))
+
+    csv_path = run_scrape(user, pw, session_index=session_option)
     
     if csv_path:
         st.success("Success! Session downloaded.")
         try:
             df_raw = pd.read_csv(csv_path)
-            st.subheader("Session Summary")
+            
+            st.markdown("### 📊 Data Preview")
+            st.write(f"**Total Rows in CSV:** {len(df_raw)}")
             
             df_clean = clean_flightscope_data(df_raw.copy())
+            
             if not df_clean.empty:
                 cols = st.columns(3)
-                cols[0].metric("Shots", len(df_clean))
+                cols[0].metric("Valid Shots", len(df_clean))
                 if 'Carry (yds)' in df_clean.columns:
                     cols[1].metric("Avg Carry", f"{df_clean['Carry (yds)'].mean():.1f} yds")
                 if 'Ball (mph)' in df_clean.columns:
                     cols[2].metric("Avg Ball Speed", f"{df_clean['Ball (mph)'].mean():.1f} mph")
             
-            st.dataframe(df_clean.head())
+                st.dataframe(df_clean.head())
+            else:
+                st.warning("Data was downloaded, but 'Valid Shots' is 0. Check the raw file below.")
 
+            # Downloads
             csv_clean = df_clean.to_csv(index=False).encode('utf-8')
             st.download_button("📥 Download Cleaned CSV", csv_clean, "flightscope_clean.csv", "text/csv")
             
             with open(csv_path, "rb") as f:
                 st.download_button("📄 Download Original CSV", f, "flightscope_raw.csv", "text/csv")
         except Exception as e:
-            st.warning(f"Preview failed: {e}")
+            st.error(f"Error reading CSV: {e}")
             with open(csv_path, "rb") as f:
                 st.download_button("Download Raw File", f, "data.raw")
