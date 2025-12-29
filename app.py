@@ -69,7 +69,6 @@ def get_driver():
     }
     chrome_options.add_experimental_option("prefs", prefs)
 
-    # Adjust path if needed for your specific environment
     service = Service(executable_path="/usr/bin/chromedriver")
     driver = webdriver.Chrome(service=service, options=chrome_options)
     
@@ -84,7 +83,7 @@ def run_scrape(username, password):
     status_text.info("Initiating Stealth Browser...")
     
     driver = get_driver()
-    wait = WebDriverWait(driver, 20)
+    wait = WebDriverWait(driver, 30) # Increased timeout to 30s
     
     try:
         # A. LOGIN
@@ -92,7 +91,6 @@ def run_scrape(username, password):
         driver.get("https://myflightscope.com/wp-login.php")
         
         try:
-            # 1. Fill Fields (Standard WP Names)
             user_field = wait.until(EC.element_to_be_clickable((By.NAME, "log")))
             pass_field = driver.find_element(By.NAME, "pwd")
             
@@ -103,7 +101,6 @@ def run_scrape(username, password):
             pass_field.send_keys(password)
             time.sleep(0.5)
             
-            # 2. CLICK BUTTON 
             submit_btn = wait.until(EC.element_to_be_clickable((
                 By.XPATH, "//button[contains(., 'Log In')]"
             )))
@@ -112,58 +109,46 @@ def run_scrape(username, password):
         except Exception as e:
             driver.save_screenshot("login_error.png")
             st.image("login_error.png", caption="Error during login interaction.")
-            raise Exception("Could not interact with login form. See screenshot.")
+            raise Exception("Could not interact with login form.")
 
         # Wait for redirect
         time.sleep(5)
         
-        # Verify Login Success
         if "wp-login" in driver.current_url:
             driver.save_screenshot("login_failed.png")
             st.image("login_failed.png", caption="Login Page (Failed to Redirect)")
             raise Exception("Login failed. Check credentials.")
 
         # B. NAVIGATE TO SESSIONS
-        status_text.info("Login Successful! going to Sessions...")
+        status_text.info("Login Successful! Going to Sessions...")
         driver.get("https://myflightscope.com/sessions/#APP=FS_GOLF")
         
-        # C. SELECT SESSION (UPDATED LOGIC)
-        status_text.info("Opening most recent session...")
+        # C. SELECT SESSION (FIXED)
+        status_text.info("Waiting for session list to populate...")
         try:
-            # 1. Wait for the TABLE CONTAINER (The Main Wrapper)
-            # This ensures we don't try to read before the list loads
-            wrapper = wait.until(EC.presence_of_element_located((
-                By.ID, "sessions-datatable"
+            # FIX: Wait specifically for TR elements inside the table
+            rows = wait.until(EC.presence_of_all_elements_located((
+                By.CSS_SELECTOR, "#sessions-datatable table tbody tr"
             )))
 
-            # 2. Find the rows inside the table body
-            # We ignore the misleading 'No data found' attribute and just look for tr tags
-            rows = wrapper.find_elements(By.CSS_SELECTOR, "table tbody tr")
-            
             if not rows:
-                raise Exception("Table container found, but 0 rows detected.")
+                raise Exception("Table loaded but returned empty list.")
 
-            # 3. Get the first row (Most Recent)
             latest_row = rows[0]
-            
-            # 4. Find the 'View' link inside that row
-            # It's usually in the last column, inside an <a> tag
             view_link = latest_row.find_element(By.TAG_NAME, "a")
-            
-            # 5. Click or Navigate
-            # Using get_attribute('href') is often safer than .click() if elements overlap
             session_url = view_link.get_attribute("href")
+            
+            status_text.info("Session found! Opening...")
             driver.get(session_url)
             
         except Exception as e:
             driver.save_screenshot("session_error.png")
-            st.image("session_error.png", caption="Failed to find/click session list")
-            raise Exception(f"Could not find the session list: {e}")
+            st.image("session_error.png", caption="Session List Error")
+            raise Exception(f"Could not find session rows: {e}")
         
         # D. CLICK EXPORT
         status_text.info("Locating Export button...")
         try:
-            # Wait specifically for the Export text span
             export_span = wait.until(EC.element_to_be_clickable((
                 By.XPATH, "//span[contains(text(), 'Export Table to CSV')]"
             )))
@@ -209,7 +194,6 @@ if submitted and user and pw:
             df_raw = pd.read_csv(csv_path)
             st.subheader("Session Summary")
             
-            # Clean and Show Stats
             df_clean = clean_flightscope_data(df_raw.copy())
             if not df_clean.empty:
                 cols = st.columns(3)
@@ -221,7 +205,6 @@ if submitted and user and pw:
             
             st.dataframe(df_clean.head())
 
-            # Downloads
             csv_clean = df_clean.to_csv(index=False).encode('utf-8')
             st.download_button("📥 Download Cleaned CSV", csv_clean, "flightscope_clean.csv", "text/csv")
             
