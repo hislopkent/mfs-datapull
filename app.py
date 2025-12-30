@@ -5,7 +5,6 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.keys import Keys
 import pandas as pd
 import time
 import os
@@ -72,30 +71,21 @@ def get_driver():
     
     return driver
 
-# --- HELPER: FORCE FILL INPUT ---
+# --- HELPER: ROBUST FILL ---
 def robust_fill(driver, element, value):
-    """
-    Tries 3 different ways to fill a field to ensure Vuetify 'sees' it.
-    """
-    # 1. Standard Selenium Clear & Type
     try:
         element.click()
         element.clear()
         element.send_keys(value)
         time.sleep(0.2)
-    except:
-        pass
-
-    # 2. JavaScript Value Injection
+    except: pass
     driver.execute_script("arguments[0].value = arguments[1];", element, value)
-    
-    # 3. Fire Events to wake up the validation logic
     driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", element)
     driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", element)
     driver.execute_script("arguments[0].dispatchEvent(new Event('blur', { bubbles: true }));", element)
     time.sleep(0.5)
 
-# --- 3. HELPER: ROBUST LOGIN ---
+# --- 3. HELPER: LOGIN ---
 def login_to_flightscope(driver, username, password):
     wait = WebDriverWait(driver, 30)
     driver.get("https://myflightscope.com/wp-login.php")
@@ -104,27 +94,20 @@ def login_to_flightscope(driver, username, password):
         if "wp-login" not in driver.current_url:
             return 
 
-        # 1. FIND FIELDS
         wait.until(EC.presence_of_element_located((By.NAME, "log")))
         user_input = driver.find_element(By.NAME, "log")
         pass_input = driver.find_element(By.NAME, "pwd")
 
-        # 2. ROBUST FILL (The Fix)
         robust_fill(driver, user_input, username)
         robust_fill(driver, pass_input, password)
         
-        # 3. CLICK LOGIN
-        # Look for the button with text 'LOG IN'
         try:
             submit_btn = driver.find_element(By.XPATH, "//*[contains(text(), 'LOG IN')]")
             driver.execute_script("arguments[0].click();", submit_btn)
         except:
-            # Fallback: Try searching for type="submit" if text fails
             submit_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
             driver.execute_script("arguments[0].click();", submit_btn)
         
-        # 4. WAIT FOR SUCCESS
-        # We wait for the URL to change OR for the login page elements to disappear
         wait.until(EC.url_changes("https://myflightscope.com/wp-login.php"))
         
         if "wp-login" in driver.current_url:
@@ -145,7 +128,6 @@ def fetch_session_list(username, password):
         login_to_flightscope(driver, username, password)
         driver.get("https://myflightscope.com/sessions/#APP=FS_GOLF")
         
-        # Wait for data table rows
         rows = wait.until(EC.presence_of_all_elements_located((
             By.CSS_SELECTOR, "#sessions-datatable table tbody tr"
         )))
@@ -156,7 +138,6 @@ def fetch_session_list(username, password):
                 if len(cols) > 4:
                     raw_date = cols[1].text.replace("\n", " ")
                     name_text = cols[2].text
-                    
                     link_el = row.find_element(By.TAG_NAME, "a")
                     url = link_el.get_attribute("href")
                     
@@ -172,16 +153,11 @@ def fetch_session_list(username, password):
     except Exception as e:
         driver.save_screenshot("fetch_error.png")
         st.error(f"Error fetching list: {e}")
-        
-        # Show debug images
-        for img in ["login_still_stuck.png", "login_crash.png", "fetch_error.png"]:
-            if os.path.exists(img):
-                st.image(img, caption=f"Debug: {img}")
         return []
     finally:
         driver.quit()
 
-# --- 5. ACTION: BATCH DOWNLOAD ---
+# --- 5. ACTION: BATCH DOWNLOAD (FIXED FOR TABS) ---
 def process_batch_downloads(username, password, selected_sessions):
     driver = get_driver()
     wait = WebDriverWait(driver, 45)
@@ -208,20 +184,33 @@ def process_batch_downloads(username, password, selected_sessions):
                 except: pass
 
             driver.get(session_url)
-            
-            time.sleep(3)
-            # Pagination Hack
+            time.sleep(5) # Let the dashboard load
+
+            # --- NEW STEP: CLICK "DATA" TAB ---
+            try:
+                # Try to find a tab labeled "DATA" or "Data" and click it
+                data_tab = wait.until(EC.element_to_be_clickable((
+                    By.XPATH, "//*[contains(text(), 'DATA') or contains(text(), 'Data')]"
+                )))
+                data_tab.click()
+                time.sleep(3) # Wait for table to load
+            except:
+                # If we can't find the tab, we might already be on it, or the selector is wrong.
+                # We proceed to try and find the export button anyway.
+                print("Could not find DATA tab, trying to find export button directly...")
+
+            # --- PAGINATION ---
             try:
                 pagination_select = driver.find_element(By.CSS_SELECTOR, ".v-data-footer__select .v-select")
                 pagination_select.click()
                 time.sleep(1)
                 all_option = driver.find_element(By.XPATH, "//div[contains(@class, 'v-list-item') and .//span[contains(text(), 'All')]]")
                 all_option.click()
-                time.sleep(2)
+                time.sleep(3)
             except:
                 pass
 
-            # Export
+            # --- EXPORT ---
             try:
                 export_span = wait.until(EC.element_to_be_clickable((
                     By.XPATH, "//span[contains(text(), 'Export Table to CSV')]"
@@ -229,8 +218,12 @@ def process_batch_downloads(username, password, selected_sessions):
                 driver.execute_script("arguments[0].scrollIntoView();", export_span)
                 time.sleep(1)
                 export_span.click()
-            except:
-                st.warning(f"Could not find Export button for {display_name}")
+            except Exception as e:
+                # --- SNAPSHOT ON FAILURE ---
+                filename = f"fail_{idx}.png"
+                driver.save_screenshot(filename)
+                st.warning(f"Could not find Export button for {display_name}. See screenshot below.")
+                st.image(filename, caption=f"View of {display_name} when failed")
                 continue
 
             time.sleep(5)
@@ -256,7 +249,7 @@ def process_batch_downloads(username, password, selected_sessions):
     except Exception as e:
         driver.save_screenshot("batch_error.png")
         st.error(f"Batch Error: {e}")
-        st.image("batch_error.png", caption="Error State Screenshot")
+        st.image("batch_error.png")
         return pd.DataFrame()
     finally:
         driver.quit()
@@ -277,8 +270,8 @@ with st.sidebar:
     if st.button("🔄 Fetch Session List"):
         if user and pw:
             # Clear old screenshots
-            for f in ["login_still_stuck.png", "login_crash.png", "fetch_error.png", "batch_error.png"]:
-                if os.path.exists(f): os.remove(f)
+            for f in os.listdir("."):
+                if f.endswith(".png"): os.remove(f)
 
             with st.spinner("Fetching from FlightScope Cloud..."):
                 found = fetch_session_list(user, pw)
