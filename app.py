@@ -44,17 +44,15 @@ def clean_flightscope_data(df):
             df[col] = df[col].apply(parse_directional)
     return df
 
-# --- 2. BROWSER SETUP (CLOUD OPTIMIZED) ---
+# --- 2. BROWSER SETUP ---
 def get_driver():
     chrome_options = Options()
-    # MANDATORY flags for Streamlit Cloud
     chrome_options.add_argument("--headless") 
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     
-    # User Agent Spoofing to avoid detection
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
     prefs = {
@@ -69,33 +67,28 @@ def get_driver():
 
     service = Service(executable_path="/usr/bin/chromedriver")
     driver = webdriver.Chrome(service=service, options=chrome_options)
-    
-    # JavaScript hack to hide the "Selenium" flag
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     
     return driver
 
-# --- 3. HELPER: ROBUST LOGIN (FIXED FOR EMPTY EMAIL) ---
+# --- 3. HELPER: ROBUST LOGIN (FIXED BUTTON) ---
 def login_to_flightscope(driver, username, password):
     """
-    Uses JavaScript to force-fill the input fields if standard typing fails.
+    Uses JavaScript to force-fill inputs and finds the button by TEXT, not ID.
     """
     wait = WebDriverWait(driver, 30)
     driver.get("https://myflightscope.com/wp-login.php")
     
     try:
         if "wp-login" not in driver.current_url:
-            return # Already logged in
+            return 
 
-        # 1. Wait for inputs
-        # We search by NAME because IDs can change on this site
+        # 1. WAIT FOR EMAIL FIELD (Using NAME="log" per your inspect)
         wait.until(EC.presence_of_element_located((By.NAME, "log")))
 
-        # 2. FORCE FILL USERNAME (The fix for your error)
-        # We find the element, then use JavaScript to set the value directly.
+        # 2. FORCE FILL USERNAME (JS Injection)
         user_input = driver.find_element(By.NAME, "log")
         driver.execute_script("arguments[0].value = arguments[1];", user_input, username)
-        # Trigger an 'input' event so the website knows we typed something
         driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", user_input)
         
         # 3. FORCE FILL PASSWORD
@@ -105,18 +98,25 @@ def login_to_flightscope(driver, username, password):
         
         time.sleep(1)
 
-        # 4. Click Login
-        submit_btn = driver.find_element(By.ID, "wp-submit")
-        driver.execute_script("arguments[0].click();", submit_btn)
+        # 4. CLICK LOGIN BUTTON (FIXED: Search by Text "LOG IN")
+        # We look for a button OR a div that contains the text 'LOG IN'
+        try:
+            submit_btn = driver.find_element(By.XPATH, "//*[contains(text(), 'LOG IN') or contains(text(), 'Log In')]")
+            # If it's a span inside a button, we want to click the parent button usually, 
+            # but clicking the span often works too. To be safe, we use JS click.
+            driver.execute_script("arguments[0].click();", submit_btn)
+        except Exception as e:
+            # Take screenshot if button finding fails
+            driver.save_screenshot("button_fail.png")
+            raise Exception("Could not find a button with text 'LOG IN'. See button_fail.png")
         
-        # 5. Wait for redirect
+        # 5. WAIT FOR REDIRECT
         wait.until(EC.url_changes("https://myflightscope.com/wp-login.php"))
         
         # Double check success
         if "wp-login" in driver.current_url:
-             # Capture a new screenshot if it still fails
-            driver.save_screenshot("login_still_failing.png")
-            raise Exception("Login failed. Check 'login_still_failing.png'.")
+            driver.save_screenshot("login_stuck.png")
+            raise Exception("Login clicked, but page did not redirect. Check login_stuck.png")
 
     except Exception as e:
         driver.save_screenshot("login_crash.png")
@@ -132,7 +132,6 @@ def fetch_session_list(username, password):
         login_to_flightscope(driver, username, password)
         driver.get("https://myflightscope.com/sessions/#APP=FS_GOLF")
         
-        # Wait explicitly for the ROWS of the table
         rows = wait.until(EC.presence_of_all_elements_located((
             By.CSS_SELECTOR, "#sessions-datatable table tbody tr"
         )))
@@ -159,7 +158,15 @@ def fetch_session_list(username, password):
     except Exception as e:
         driver.save_screenshot("fetch_error.png")
         st.error(f"Error fetching list: {e}")
-        st.image("fetch_error.png", caption="What the bot saw when it failed")
+        
+        # Show debug images if they exist
+        if os.path.exists("button_fail.png"):
+            st.image("button_fail.png", caption="Failed to find Submit Button")
+        elif os.path.exists("login_stuck.png"):
+            st.image("login_stuck.png", caption="Stuck on Login Page")
+        elif os.path.exists("fetch_error.png"):
+            st.image("fetch_error.png", caption="General Error Screenshot")
+            
         return []
     finally:
         driver.quit()
@@ -194,7 +201,6 @@ def process_batch_downloads(username, password, selected_sessions):
             
             time.sleep(3)
             try:
-                # Pagination logic
                 pagination_select = driver.find_element(By.CSS_SELECTOR, ".v-data-footer__select .v-select")
                 pagination_select.click()
                 time.sleep(1)
@@ -258,9 +264,10 @@ with st.sidebar:
     
     if st.button("🔄 Fetch Session List"):
         if user and pw:
-            if os.path.exists("fetch_error.png"): os.remove("fetch_error.png")
-            if os.path.exists("login_crash.png"): os.remove("login_crash.png")
-            
+            # Clear old screenshots
+            for f in ["button_fail.png", "login_stuck.png", "fetch_error.png", "batch_error.png"]:
+                if os.path.exists(f): os.remove(f)
+
             with st.spinner("Fetching from FlightScope Cloud..."):
                 found = fetch_session_list(user, pw)
                 if found:
