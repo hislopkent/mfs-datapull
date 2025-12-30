@@ -157,7 +157,7 @@ def fetch_session_list(username, password):
     finally:
         driver.quit()
 
-# --- 5. ACTION: BATCH DOWNLOAD (FIXED FOR TABS) ---
+# --- 5. ACTION: BATCH DOWNLOAD (UPDATED FOR ID) ---
 def process_batch_downloads(username, password, selected_sessions):
     driver = get_driver()
     wait = WebDriverWait(driver, 45)
@@ -184,20 +184,17 @@ def process_batch_downloads(username, password, selected_sessions):
                 except: pass
 
             driver.get(session_url)
-            time.sleep(5) # Let the dashboard load
+            time.sleep(5) 
 
-            # --- NEW STEP: CLICK "DATA" TAB ---
+            # --- CLICK "DATA" TAB ---
             try:
-                # Try to find a tab labeled "DATA" or "Data" and click it
                 data_tab = wait.until(EC.element_to_be_clickable((
                     By.XPATH, "//*[contains(text(), 'DATA') or contains(text(), 'Data')]"
                 )))
                 data_tab.click()
-                time.sleep(3) # Wait for table to load
+                time.sleep(3) 
             except:
-                # If we can't find the tab, we might already be on it, or the selector is wrong.
-                # We proceed to try and find the export button anyway.
-                print("Could not find DATA tab, trying to find export button directly...")
+                print("Could not find DATA tab, assuming we are on it...")
 
             # --- PAGINATION ---
             try:
@@ -210,20 +207,23 @@ def process_batch_downloads(username, password, selected_sessions):
             except:
                 pass
 
-            # --- EXPORT ---
+            # --- EXPORT (FIXED: USING ID) ---
             try:
-                export_span = wait.until(EC.element_to_be_clickable((
-                    By.XPATH, "//span[contains(text(), 'Export Table to CSV')]"
+                # We target the ID "exportAllTablesCsv" directly
+                export_btn = wait.until(EC.element_to_be_clickable((
+                    By.ID, "exportAllTablesCsv"
                 )))
-                driver.execute_script("arguments[0].scrollIntoView();", export_span)
+                
+                # JS Click to be safe
+                driver.execute_script("arguments[0].scrollIntoView();", export_btn)
                 time.sleep(1)
-                export_span.click()
+                driver.execute_script("arguments[0].click();", export_btn)
+                
             except Exception as e:
-                # --- SNAPSHOT ON FAILURE ---
                 filename = f"fail_{idx}.png"
                 driver.save_screenshot(filename)
-                st.warning(f"Could not find Export button for {display_name}. See screenshot below.")
-                st.image(filename, caption=f"View of {display_name} when failed")
+                st.warning(f"Could not find Export button (ID: exportAllTablesCsv). See screenshot below.")
+                st.image(filename)
                 continue
 
             time.sleep(5)
