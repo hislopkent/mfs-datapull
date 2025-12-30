@@ -5,6 +5,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.keys import Keys
 import pandas as pd
 import time
 import os
@@ -71,11 +72,31 @@ def get_driver():
     
     return driver
 
-# --- 3. HELPER: ROBUST LOGIN (FIXED BUTTON) ---
+# --- HELPER: FORCE FILL INPUT ---
+def robust_fill(driver, element, value):
+    """
+    Tries 3 different ways to fill a field to ensure Vuetify 'sees' it.
+    """
+    # 1. Standard Selenium Clear & Type
+    try:
+        element.click()
+        element.clear()
+        element.send_keys(value)
+        time.sleep(0.2)
+    except:
+        pass
+
+    # 2. JavaScript Value Injection
+    driver.execute_script("arguments[0].value = arguments[1];", element, value)
+    
+    # 3. Fire Events to wake up the validation logic
+    driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", element)
+    driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", element)
+    driver.execute_script("arguments[0].dispatchEvent(new Event('blur', { bubbles: true }));", element)
+    time.sleep(0.5)
+
+# --- 3. HELPER: ROBUST LOGIN ---
 def login_to_flightscope(driver, username, password):
-    """
-    Uses JavaScript to force-fill inputs and finds the button by TEXT, not ID.
-    """
     wait = WebDriverWait(driver, 30)
     driver.get("https://myflightscope.com/wp-login.php")
     
@@ -83,44 +104,36 @@ def login_to_flightscope(driver, username, password):
         if "wp-login" not in driver.current_url:
             return 
 
-        # 1. WAIT FOR EMAIL FIELD (Using NAME="log" per your inspect)
+        # 1. FIND FIELDS
         wait.until(EC.presence_of_element_located((By.NAME, "log")))
-
-        # 2. FORCE FILL USERNAME (JS Injection)
         user_input = driver.find_element(By.NAME, "log")
-        driver.execute_script("arguments[0].value = arguments[1];", user_input, username)
-        driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", user_input)
-        
-        # 3. FORCE FILL PASSWORD
         pass_input = driver.find_element(By.NAME, "pwd")
-        driver.execute_script("arguments[0].value = arguments[1];", pass_input, password)
-        driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", pass_input)
-        
-        time.sleep(1)
 
-        # 4. CLICK LOGIN BUTTON (FIXED: Search by Text "LOG IN")
-        # We look for a button OR a div that contains the text 'LOG IN'
-        try:
-            submit_btn = driver.find_element(By.XPATH, "//*[contains(text(), 'LOG IN') or contains(text(), 'Log In')]")
-            # If it's a span inside a button, we want to click the parent button usually, 
-            # but clicking the span often works too. To be safe, we use JS click.
-            driver.execute_script("arguments[0].click();", submit_btn)
-        except Exception as e:
-            # Take screenshot if button finding fails
-            driver.save_screenshot("button_fail.png")
-            raise Exception("Could not find a button with text 'LOG IN'. See button_fail.png")
+        # 2. ROBUST FILL (The Fix)
+        robust_fill(driver, user_input, username)
+        robust_fill(driver, pass_input, password)
         
-        # 5. WAIT FOR REDIRECT
+        # 3. CLICK LOGIN
+        # Look for the button with text 'LOG IN'
+        try:
+            submit_btn = driver.find_element(By.XPATH, "//*[contains(text(), 'LOG IN')]")
+            driver.execute_script("arguments[0].click();", submit_btn)
+        except:
+            # Fallback: Try searching for type="submit" if text fails
+            submit_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
+            driver.execute_script("arguments[0].click();", submit_btn)
+        
+        # 4. WAIT FOR SUCCESS
+        # We wait for the URL to change OR for the login page elements to disappear
         wait.until(EC.url_changes("https://myflightscope.com/wp-login.php"))
         
-        # Double check success
         if "wp-login" in driver.current_url:
-            driver.save_screenshot("login_stuck.png")
-            raise Exception("Login clicked, but page did not redirect. Check login_stuck.png")
+            driver.save_screenshot("login_still_stuck.png")
+            raise Exception("Login failed. See login_still_stuck.png")
 
     except Exception as e:
         driver.save_screenshot("login_crash.png")
-        raise Exception(f"Login Interaction Failed: {e}")
+        raise Exception(f"Login Failed: {e}")
 
 # --- 4. ACTION: FETCH SESSION LIST ---
 def fetch_session_list(username, password):
@@ -132,6 +145,7 @@ def fetch_session_list(username, password):
         login_to_flightscope(driver, username, password)
         driver.get("https://myflightscope.com/sessions/#APP=FS_GOLF")
         
+        # Wait for data table rows
         rows = wait.until(EC.presence_of_all_elements_located((
             By.CSS_SELECTOR, "#sessions-datatable table tbody tr"
         )))
@@ -159,14 +173,10 @@ def fetch_session_list(username, password):
         driver.save_screenshot("fetch_error.png")
         st.error(f"Error fetching list: {e}")
         
-        # Show debug images if they exist
-        if os.path.exists("button_fail.png"):
-            st.image("button_fail.png", caption="Failed to find Submit Button")
-        elif os.path.exists("login_stuck.png"):
-            st.image("login_stuck.png", caption="Stuck on Login Page")
-        elif os.path.exists("fetch_error.png"):
-            st.image("fetch_error.png", caption="General Error Screenshot")
-            
+        # Show debug images
+        for img in ["login_still_stuck.png", "login_crash.png", "fetch_error.png"]:
+            if os.path.exists(img):
+                st.image(img, caption=f"Debug: {img}")
         return []
     finally:
         driver.quit()
@@ -200,6 +210,7 @@ def process_batch_downloads(username, password, selected_sessions):
             driver.get(session_url)
             
             time.sleep(3)
+            # Pagination Hack
             try:
                 pagination_select = driver.find_element(By.CSS_SELECTOR, ".v-data-footer__select .v-select")
                 pagination_select.click()
@@ -210,6 +221,7 @@ def process_batch_downloads(username, password, selected_sessions):
             except:
                 pass
 
+            # Export
             try:
                 export_span = wait.until(EC.element_to_be_clickable((
                     By.XPATH, "//span[contains(text(), 'Export Table to CSV')]"
@@ -265,7 +277,7 @@ with st.sidebar:
     if st.button("🔄 Fetch Session List"):
         if user and pw:
             # Clear old screenshots
-            for f in ["button_fail.png", "login_stuck.png", "fetch_error.png", "batch_error.png"]:
+            for f in ["login_still_stuck.png", "login_crash.png", "fetch_error.png", "batch_error.png"]:
                 if os.path.exists(f): os.remove(f)
 
             with st.spinner("Fetching from FlightScope Cloud..."):
